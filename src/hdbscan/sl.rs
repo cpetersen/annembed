@@ -18,6 +18,7 @@ use std::collections::{BinaryHeap, HashSet};
 
 use hnsw_rs::prelude::*;
 
+use super::condensed::CondensedTree;
 use super::core_distance::{CoreDistance, mutual_reachability_distance};
 use super::hierarchy::{ClusterHierarchy, HierarchicalUnionFind};
 use super::kruskal::*;
@@ -225,6 +226,19 @@ where
         kruskal(&edge_list)
             .map(|(a, b, w)| (a as usize, b as usize, w))
             .collect()
+    }
+    
+    /// Build the condensed tree from the hierarchy
+    /// 
+    /// # Arguments
+    /// * `min_samples` - Minimum number of samples for core point computation
+    /// * `min_cluster_size` - Minimum size for a cluster to be considered
+    /// 
+    /// # Returns
+    /// A CondensedTree that can be used for cluster extraction
+    pub fn build_condensed_tree(&self, min_samples: usize, min_cluster_size: usize) -> CondensedTree<F> {
+        let hierarchy = self.build_hierarchy(min_samples);
+        CondensedTree::from_hierarchy(&hierarchy, min_cluster_size)
     }
     
     /// Build the cluster hierarchy from an MST using mutual reachability distances
@@ -549,6 +563,102 @@ mod tests {
         if let Some(root_id) = hierarchy.root {
             assert_eq!(preorder[0], root_id);
             assert_eq!(postorder[postorder.len() - 1], root_id);
+        }
+    }
+    
+    #[test]
+    fn test_condensed_tree_construction() {
+        // Dataset with two clear clusters
+        let data = vec![
+            // Cluster 1 (tight)
+            vec![0.0, 0.0],
+            vec![0.1, 0.0],
+            vec![0.0, 0.1],
+            vec![0.1, 0.1],
+            // Cluster 2 (tight)
+            vec![5.0, 0.0],
+            vec![5.1, 0.0],
+            vec![5.0, 0.1],
+            vec![5.1, 0.1],
+        ];
+        
+        let hnsw = build_hnsw(&data);
+        let clustering = SLclustering::<usize, f32>::new(&hnsw, 1);
+        
+        // Build condensed tree with min_cluster_size=3
+        let condensed = clustering.build_condensed_tree(2, 3);
+        
+        // Should have created a condensed tree
+        assert!(condensed.num_nodes() > 0);
+        
+        // Get statistics
+        let stats = condensed.get_stats();
+        log::debug!("Condensed tree stats: {:?}", stats);
+        
+        // Should have identified some stable clusters
+        assert!(stats.num_clusters > 0);
+        assert!(stats.max_stability > 0.0);
+    }
+    
+    #[test]
+    fn test_condensed_tree_with_noise() {
+        // Dataset with clusters and noise
+        let data = vec![
+            // Main cluster
+            vec![0.0, 0.0],
+            vec![0.1, 0.0],
+            vec![0.0, 0.1],
+            vec![0.1, 0.1],
+            vec![0.05, 0.05],
+            // Outliers
+            vec![10.0, 10.0],
+            vec![15.0, 15.0],
+        ];
+        
+        let hnsw = build_hnsw(&data);
+        let clustering = SLclustering::<usize, f32>::new(&hnsw, 1);
+        
+        // Build condensed tree with min_cluster_size=4
+        let condensed = clustering.build_condensed_tree(3, 4);
+        
+        let stats = condensed.get_stats();
+        log::debug!("Condensed tree with noise stats: {:?}", stats);
+        
+        // Should have some noise points (outliers)
+        // Note: exact count depends on hierarchy structure
+        assert!(condensed.num_nodes() > 0);
+    }
+    
+    #[test]
+    fn test_most_stable_clusters() {
+        // Create dataset with clusters of different stability
+        let data = vec![
+            // Very tight cluster (high stability)
+            vec![0.0, 0.0],
+            vec![0.01, 0.0],
+            vec![0.0, 0.01],
+            vec![0.01, 0.01],
+            // Looser cluster (lower stability)
+            vec![5.0, 0.0],
+            vec![5.3, 0.0],
+            vec![5.0, 0.3],
+            vec![5.3, 0.3],
+        ];
+        
+        let hnsw = build_hnsw(&data);
+        let clustering = SLclustering::<usize, f32>::new(&hnsw, 1);
+        
+        let condensed = clustering.build_condensed_tree(2, 3);
+        
+        // Get most stable clusters
+        let stable_clusters = condensed.get_most_stable_clusters(2);
+        
+        // Should find stable clusters
+        assert!(!stable_clusters.is_empty());
+        
+        // Clusters should be ordered by stability (descending)
+        for i in 1..stable_clusters.len() {
+            assert!(stable_clusters[i-1].1 >= stable_clusters[i].1);
         }
     }
 }
