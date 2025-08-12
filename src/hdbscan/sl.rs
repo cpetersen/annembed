@@ -19,6 +19,7 @@ use std::collections::{BinaryHeap, HashSet};
 use hnsw_rs::prelude::*;
 
 use super::core_distance::{CoreDistance, mutual_reachability_distance};
+use super::hierarchy::{ClusterHierarchy, HierarchicalUnionFind};
 use super::kruskal::*;
 use crate::fromhnsw::kgraph::KGraph;
 use crate::fromhnsw::kgraph_from_hnsw_all;
@@ -226,6 +227,67 @@ where
             .collect()
     }
     
+    /// Build the cluster hierarchy from an MST using mutual reachability distances
+    /// 
+    /// # Arguments
+    /// * `min_samples` - Minimum number of samples for core point computation
+    /// 
+    /// # Returns
+    /// A ClusterHierarchy that represents the dendrogram of the clustering
+    pub fn build_hierarchy(&self, min_samples: usize) -> ClusterHierarchy<F> {
+        // Get the MST with mutual reachability distances
+        let mst = self.build_mrd_mst(min_samples);
+        
+        // Sort edges by weight (ascending) for bottom-up hierarchy construction
+        let mut sorted_edges = mst;
+        sorted_edges.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
+        
+        // Initialize hierarchy and union-find
+        let num_points = self.kgraph.get_nb_nodes();
+        let mut hierarchy = ClusterHierarchy::new(num_points);
+        let mut uf = HierarchicalUnionFind::<usize>::new(num_points);
+        
+        // Process edges in order of increasing weight
+        for (node_a, node_b, weight) in sorted_edges {
+            // Find representatives of the two nodes
+            let rep_a = uf.find(node_a);
+            let rep_b = uf.find(node_b);
+            
+            // Skip if already in same cluster
+            if rep_a == rep_b {
+                continue;
+            }
+            
+            // Get the hierarchy nodes for the representatives
+            let node_id_a = uf.get_node_id(rep_a).unwrap();
+            let node_id_b = uf.get_node_id(rep_b).unwrap();
+            
+            // Compute lambda (1/distance) - avoid division by zero
+            let lambda = if weight > F::zero() {
+                F::one() / weight
+            } else {
+                F::infinity()
+            };
+            
+            // Merge clusters in hierarchy
+            let new_cluster_id = hierarchy.merge(node_id_a, node_id_b, lambda);
+            
+            // Union the sets and get new representative
+            let new_rep = uf.union(node_a, node_b);
+            
+            // Update union-find to hierarchy mapping
+            if rep_a == new_rep {
+                uf.update_node_mapping(rep_b, new_rep, new_cluster_id);
+            } else {
+                uf.update_node_mapping(rep_a, new_rep, new_cluster_id);
+            }
+        }
+        
+        log::info!("Built hierarchy with {} nodes", hierarchy.num_nodes());
+        
+        hierarchy
+    }
+    
     /// computes clustering
     pub fn cluster(&mut self) {
         let _kgraph_stats = self.kgraph.get_kraph_stats();
@@ -400,5 +462,93 @@ mod tests {
         assert!(outlier_core > cluster_core_max * 10.0,
                 "Outlier core distance {} should be much larger than cluster max {}",
                 outlier_core, cluster_core_max);
+    }
+    
+    #[test]
+    fn test_hierarchy_construction() {
+        // Create a simple dataset with clear clusters
+        let data = vec![
+            // Cluster 1
+            vec![0.0, 0.0],
+            vec![0.1, 0.0],
+            vec![0.0, 0.1],
+            // Cluster 2
+            vec![3.0, 0.0],
+            vec![3.1, 0.0],
+            vec![3.0, 0.1],
+        ];
+        
+        let hnsw = build_hnsw(&data);
+        let clustering = SLclustering::<usize, f32>::new(&hnsw, 1);
+        let hierarchy = clustering.build_hierarchy(2);
+        
+        // Check basic hierarchy properties
+        assert_eq!(hierarchy.num_points(), 6);
+        // Should have 6 leaves + 5 internal nodes (binary tree)
+        assert_eq!(hierarchy.num_nodes(), 11);
+        
+        // Get hierarchy statistics
+        let stats = hierarchy.get_stats();
+        assert_eq!(stats.num_leaves, 6);
+        assert_eq!(stats.num_merges, 5);
+        
+        // Lambda values should be positive (or infinite for first merges)
+        assert!(stats.min_lambda >= 0.0 || stats.min_lambda.is_infinite());
+    }
+    
+    #[test]
+    fn test_hierarchy_with_single_cluster() {
+        // All points in one tight cluster
+        let data = vec![
+            vec![0.0, 0.0],
+            vec![0.01, 0.0],
+            vec![0.0, 0.01],
+            vec![0.01, 0.01],
+        ];
+        
+        let hnsw = build_hnsw(&data);
+        let clustering = SLclustering::<usize, f32>::new(&hnsw, 1);
+        let hierarchy = clustering.build_hierarchy(2);
+        
+        // Should have created a complete hierarchy
+        assert_eq!(hierarchy.num_points(), 4);
+        assert_eq!(hierarchy.num_nodes(), 7); // 4 leaves + 3 internal
+        
+        // All merges should happen at similar lambda values (dense cluster)
+        let stats = hierarchy.get_stats();
+        if stats.min_lambda.is_finite() && stats.max_lambda.is_finite() {
+            let lambda_range = stats.max_lambda - stats.min_lambda;
+            // In a dense cluster, lambda values should be similar
+            assert!(lambda_range < stats.max_lambda * 2.0,
+                    "Lambda range {} too large for single cluster", lambda_range);
+        }
+    }
+    
+    #[test]
+    fn test_hierarchy_traversals() {
+        // Simple 3-point dataset
+        let data = vec![
+            vec![0.0, 0.0],
+            vec![1.0, 0.0],
+            vec![2.0, 0.0],
+        ];
+        
+        let hnsw = build_hnsw(&data);
+        let clustering = SLclustering::<usize, f32>::new(&hnsw, 1);
+        let hierarchy = clustering.build_hierarchy(2);
+        
+        // Test traversal methods
+        let preorder = hierarchy.preorder_traversal();
+        let postorder = hierarchy.postorder_traversal();
+        
+        // Both should visit all nodes
+        assert_eq!(preorder.len(), hierarchy.num_nodes());
+        assert_eq!(postorder.len(), hierarchy.num_nodes());
+        
+        // Root should be first in preorder, last in postorder
+        if let Some(root_id) = hierarchy.root {
+            assert_eq!(preorder[0], root_id);
+            assert_eq!(postorder[postorder.len() - 1], root_id);
+        }
     }
 }

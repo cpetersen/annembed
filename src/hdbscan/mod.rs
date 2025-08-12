@@ -26,11 +26,13 @@
 //!
 
 mod core_distance;
+mod hierarchy;
 mod kruskal;
 mod sl;
 
 // Re-export core types
 pub use self::core_distance::{CoreDistance, mutual_reachability_distance};
+pub use self::hierarchy::{ClusterHierarchy, HierarchyNode, HierarchyStats, HierarchicalUnionFind};
 pub use self::sl::SLclustering;
 
 // 1.  We get from the hnsw a list of edges for kruskal algorithm
