@@ -159,9 +159,16 @@ impl<F: Float> CondensedTree<F> {
         let node = &self.nodes[node_idx];
         
         if node.is_leaf() {
-            // Leaf nodes are always candidates for selection
-            is_selected[node_idx] = true;
-            subtree_stability[node_idx] = node.stability;
+            // Leaf nodes are candidates for selection only if they have points
+            // (not just fallen points) or positive stability
+            if !node.points.is_empty() || node.stability > F::zero() {
+                is_selected[node_idx] = true;
+                subtree_stability[node_idx] = node.stability;
+            } else {
+                // Node with only fallen points and no stability - don't select
+                is_selected[node_idx] = false;
+                subtree_stability[node_idx] = F::zero();
+            }
         } else {
             // Internal node - compare selecting this vs selecting children
             let mut children_stability = F::zero();

@@ -102,8 +102,25 @@ impl<F: Float> CondensedTree<F> {
         // Start condensation from the root
         if let Some(root_id) = hierarchy.root {
             tree.root = tree.condense_recursive(hierarchy, root_id, None);
-            tree.fix_point_assignments();
-            tree.calculate_stabilities();
+            
+            // Special case: if root returns None (too small), all points are noise
+            if tree.root.is_none() {
+                // Create a single node to track all points as noise
+                if let Some(h_root) = hierarchy.get_node(root_id) {
+                    let mut root_node = CondensedNode::new(0, h_root.lambda_birth);
+                    // All points fall out as noise
+                    for &point in &h_root.points {
+                        root_node.points_fallen.push((point, h_root.lambda_birth));
+                    }
+                    // Ensure this node has zero stability so it won't be selected as a cluster
+                    root_node.stability = F::zero();
+                    tree.nodes.push(root_node);
+                    tree.root = Some(0);
+                }
+            } else {
+                tree.fix_point_assignments();
+                tree.calculate_stabilities();
+            }
         }
         
         tree
