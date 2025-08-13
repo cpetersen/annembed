@@ -102,10 +102,64 @@ impl<F: Float> CondensedTree<F> {
         // Start condensation from the root
         if let Some(root_id) = hierarchy.root {
             tree.root = tree.condense_recursive(hierarchy, root_id, None);
+            tree.fix_point_assignments();
             tree.calculate_stabilities();
         }
         
         tree
+    }
+    
+    /// Fix point assignments after tree construction
+    /// Removes points from internal nodes that belong to children
+    fn fix_point_assignments(&mut self) {
+        // Process nodes in reverse order (bottom-up) to ensure children are processed first
+        for i in (0..self.nodes.len()).rev() {
+            if !self.nodes[i].child_nodes.is_empty() {
+                // Internal node - remove points that belong to children
+                let mut points_to_remove = std::collections::HashSet::new();
+                
+                // Collect points that belong to children
+                for &child_idx in &self.nodes[i].child_nodes.clone() {
+                    for &point in &self.nodes[child_idx].points {
+                        points_to_remove.insert(point);
+                    }
+                }
+                
+                // Also remove points that fell out
+                for &(point, _) in &self.nodes[i].points_fallen {
+                    points_to_remove.insert(point);
+                }
+                
+                // Keep only points not in children or fallen
+                self.nodes[i].points.retain(|p| !points_to_remove.contains(p));
+            }
+        }
+    }
+    
+    /// Collect all points in a subtree
+    fn collect_subtree_points(&self, node_idx: usize, points: &mut std::collections::HashSet<usize>) {
+        // Check for invalid index
+        if node_idx >= self.nodes.len() {
+            log::error!("Invalid node index {} in collect_subtree_points", node_idx);
+            return;
+        }
+        
+        // Add points directly in this node
+        for &point in &self.nodes[node_idx].points {
+            points.insert(point);
+        }
+        // Add points that fell out from this node
+        for &(point, _) in &self.nodes[node_idx].points_fallen {
+            points.insert(point);
+        }
+        // Recursively add points from children
+        for &child_idx in &self.nodes[node_idx].child_nodes {
+            if child_idx == node_idx {
+                log::error!("Node {} is its own child!", node_idx);
+                continue;
+            }
+            self.collect_subtree_points(child_idx, points);
+        }
     }
     
     /// Recursively condense the hierarchy
@@ -150,7 +204,13 @@ impl<F: Float> CondensedTree<F> {
                 self.nodes[node_idx].points = h_node.points.clone();
             } else {
                 // Internal node - process children
+                log::debug!("Node {} processing {} children", node_idx, h_node.children.len());
+                let mut processed_children = std::collections::HashSet::new();
                 for &child_id in &h_node.children {
+                    if !processed_children.insert(child_id) {
+                        log::warn!("Hierarchy node {} has duplicate child {}", hierarchy_node_id, child_id);
+                        continue;
+                    }
                     if let Some(child_h_node) = hierarchy.get_node(child_id) {
                         if child_h_node.size < self.min_cluster_size {
                             // Child too small - points fall out
@@ -160,47 +220,23 @@ impl<F: Float> CondensedTree<F> {
                             }
                         } else {
                             // Child large enough - recurse
-                            if let Some(child_condensed_idx) = 
-                                self.condense_recursive(hierarchy, child_id, Some(node_idx)) {
-                                self.nodes[node_idx].child_nodes.push(child_condensed_idx);
-                                
-                                // Update child's parent pointer
-                                self.nodes[child_condensed_idx].parent = Some(node_idx);
-                            }
+                            // The child will add itself to our child_nodes list
+                            self.condense_recursive(hierarchy, child_id, Some(node_idx));
                         }
                     }
                 }
                 
-                // Any points not accounted for stay in this cluster
-                // (This handles edge cases in the hierarchy)
-                let mut accounted_points = std::collections::HashSet::new();
-                
-                // Points in children
-                for &child_idx in &self.nodes[node_idx].child_nodes.clone() {
-                    for &point in &self.nodes[child_idx].points {
-                        accounted_points.insert(point);
-                    }
-                    for &(point, _) in &self.nodes[child_idx].points_fallen {
-                        accounted_points.insert(point);
-                    }
-                }
-                
-                // Points that fell out
-                for &(point, _) in &self.nodes[node_idx].points_fallen.clone() {
-                    accounted_points.insert(point);
-                }
-                
-                // Remaining points stay in this node
-                for &point in &h_node.points {
-                    if !accounted_points.contains(&point) {
-                        self.nodes[node_idx].points.push(point);
-                    }
-                }
+                // For internal nodes, temporarily store all points from hierarchy
+                // We'll fix this up in a post-processing step
+                self.nodes[node_idx].points = h_node.points.clone();
             }
             
             // Update parent's child list if needed
             if let Some(parent_idx) = parent_condensed_id {
-                self.nodes[parent_idx].child_nodes.push(node_idx);
+                // Check if this child is already in the parent's list (shouldn't happen but be safe)
+                if !self.nodes[parent_idx].child_nodes.contains(&node_idx) {
+                    self.nodes[parent_idx].child_nodes.push(node_idx);
+                }
             }
             
             Some(node_idx)

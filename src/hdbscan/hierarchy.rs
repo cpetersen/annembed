@@ -322,11 +322,9 @@ impl<Ix: PrimInt> HierarchicalUnionFind<Ix> {
     }
     
     /// Update the mapping from UF representative to hierarchy node
-    pub fn update_node_mapping(&mut self, old_rep: Ix, new_rep: Ix, new_node_id: usize) {
-        let old_idx = old_rep.to_usize().unwrap();
+    /// This is called after a union to update the mapping for the new cluster
+    pub fn update_node_mapping(&mut self, new_rep: Ix, new_node_id: usize) {
         let new_idx = new_rep.to_usize().unwrap();
-        
-        self.rep_to_node.remove(&old_idx);
         self.rep_to_node.insert(new_idx, new_node_id);
     }
     
@@ -421,7 +419,7 @@ mod tests {
         assert!(!uf.connected(0, 2));
         
         // Update node mapping
-        uf.update_node_mapping(1, rep_01, 10); // Map to new hierarchy node 10
+        uf.update_node_mapping(rep_01, 10); // Map to new hierarchy node 10
         assert_eq!(uf.get_node_id(rep_01), Some(10));
     }
     

@@ -27,13 +27,16 @@
 
 mod condensed;
 mod core_distance;
+mod extraction;
 mod hierarchy;
 mod kruskal;
 mod sl;
+mod tests;
 
 // Re-export core types
 pub use self::condensed::{CondensedNode, CondensedTree, CondensedTreeStats};
 pub use self::core_distance::{CoreDistance, mutual_reachability_distance};
+pub use self::extraction::{ClusterAssignment, SelectionMethod};
 pub use self::hierarchy::{ClusterHierarchy, HierarchyNode, HierarchyStats, HierarchicalUnionFind};
 pub use self::sl::SLclustering;
 

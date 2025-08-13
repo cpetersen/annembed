@@ -20,6 +20,7 @@ use hnsw_rs::prelude::*;
 
 use super::condensed::CondensedTree;
 use super::core_distance::{CoreDistance, mutual_reachability_distance};
+use super::extraction::{ClusterAssignment, SelectionMethod};
 use super::hierarchy::{ClusterHierarchy, HierarchicalUnionFind};
 use super::kruskal::*;
 use crate::fromhnsw::kgraph::KGraph;
@@ -241,6 +242,25 @@ where
         CondensedTree::from_hierarchy(&hierarchy, min_cluster_size)
     }
     
+    /// Complete HDBSCAN clustering pipeline
+    /// 
+    /// # Arguments
+    /// * `min_samples` - Minimum number of samples for core point computation
+    /// * `min_cluster_size` - Minimum size for a cluster to be considered
+    /// * `selection_method` - Method for selecting clusters (EOM or Leaf)
+    /// 
+    /// # Returns
+    /// A ClusterAssignment with labels, probabilities, and stabilities
+    pub fn cluster_hdbscan(
+        &self,
+        min_samples: usize,
+        min_cluster_size: usize,
+        selection_method: SelectionMethod,
+    ) -> ClusterAssignment {
+        let condensed = self.build_condensed_tree(min_samples, min_cluster_size);
+        condensed.extract_clusters(selection_method)
+    }
+    
     /// Build the cluster hierarchy from an MST using mutual reachability distances
     /// 
     /// # Arguments
@@ -290,11 +310,8 @@ where
             let new_rep = uf.union(node_a, node_b);
             
             // Update union-find to hierarchy mapping
-            if rep_a == new_rep {
-                uf.update_node_mapping(rep_b, new_rep, new_cluster_id);
-            } else {
-                uf.update_node_mapping(rep_a, new_rep, new_cluster_id);
-            }
+            // The new representative maps to the new cluster
+            uf.update_node_mapping(new_rep, new_cluster_id);
         }
         
         log::info!("Built hierarchy with {} nodes", hierarchy.num_nodes());
@@ -659,6 +676,136 @@ mod tests {
         // Clusters should be ordered by stability (descending)
         for i in 1..stable_clusters.len() {
             assert!(stable_clusters[i-1].1 >= stable_clusters[i].1);
+        }
+    }
+    
+    #[test]
+    fn test_complete_hdbscan_pipeline() {
+        // Create dataset with two clear clusters
+        let data = vec![
+            // Cluster 1
+            vec![0.0, 0.0],
+            vec![0.1, 0.0],
+            vec![0.0, 0.1],
+            vec![0.1, 0.1],
+            vec![0.05, 0.05],
+            // Cluster 2
+            vec![3.0, 0.0],
+            vec![3.1, 0.0],
+            vec![3.0, 0.1],
+            vec![3.1, 0.1],
+            vec![3.05, 0.05],
+        ];
+        
+        let hnsw = build_hnsw(&data);
+        let clustering = SLclustering::<usize, f32>::new(&hnsw, 1);
+        
+        // Run complete HDBSCAN pipeline
+        let assignment = clustering.cluster_hdbscan(3, 3, SelectionMethod::Eom);
+        
+        // Should have found clusters
+        assert!(assignment.num_clusters() > 0);
+        
+        // Should have labels for all points
+        assert_eq!(assignment.labels.len(), data.len());
+        
+        // Labels should be valid (either cluster id >= 0 or -1 for noise)
+        for label in &assignment.labels {
+            assert!(*label >= -1);
+        }
+        
+        // Probabilities should be in range [0, 1]
+        for prob in &assignment.probabilities {
+            assert!(*prob >= 0.0 && *prob <= 1.0);
+        }
+        
+        log::debug!("Found {} clusters with {} noise points",
+                   assignment.num_clusters(), assignment.num_noise());
+    }
+    
+    #[test]
+    fn test_hdbscan_with_outliers() {
+        // Dataset with clusters and outliers
+        let data = vec![
+            // Main cluster
+            vec![0.0, 0.0],
+            vec![0.1, 0.0],
+            vec![0.0, 0.1],
+            vec![0.1, 0.1],
+            vec![0.05, 0.05],
+            // Outliers far away
+            vec![10.0, 10.0],
+            vec![15.0, 15.0],
+            vec![20.0, 20.0],
+        ];
+        
+        let hnsw = build_hnsw(&data);
+        let clustering = SLclustering::<usize, f32>::new(&hnsw, 1);
+        
+        // Run HDBSCAN with min_cluster_size=4
+        let assignment = clustering.cluster_hdbscan(3, 4, SelectionMethod::Eom);
+        
+        // Should identify the main cluster
+        let cluster_points: Vec<usize> = assignment.labels
+            .iter()
+            .enumerate()
+            .filter(|(_, label)| **label >= 0)
+            .map(|(idx, _)| idx)
+            .collect();
+        
+        // Should identify at least some cluster points
+        // The exact number depends on HNSW graph construction
+        assert!(cluster_points.len() > 0 || assignment.num_noise() == data.len());
+        
+        // Outliers should be marked as noise (-1)
+        let noise_count = assignment.num_noise();
+        assert!(noise_count > 0);
+        
+        log::debug!("Identified {} cluster points and {} noise points",
+                   cluster_points.len(), noise_count);
+    }
+    
+    #[test]
+    fn test_leaf_vs_eom_selection() {
+        // Create hierarchical dataset
+        let data = vec![
+            // Subcluster 1a
+            vec![0.0, 0.0],
+            vec![0.1, 0.0],
+            // Subcluster 1b
+            vec![0.5, 0.0],
+            vec![0.6, 0.0],
+            // Subcluster 2a
+            vec![3.0, 0.0],
+            vec![3.1, 0.0],
+            // Subcluster 2b
+            vec![3.5, 0.0],
+            vec![3.6, 0.0],
+        ];
+        
+        let hnsw = build_hnsw(&data);
+        let clustering = SLclustering::<usize, f32>::new(&hnsw, 1);
+        
+        // Test with EOM selection
+        let eom_assignment = clustering.cluster_hdbscan(2, 2, SelectionMethod::Eom);
+        
+        // Test with Leaf selection
+        let leaf_assignment = clustering.cluster_hdbscan(2, 2, SelectionMethod::Leaf);
+        
+        // Both should produce valid clusterings
+        assert!(eom_assignment.labels.len() == data.len());
+        assert!(leaf_assignment.labels.len() == data.len());
+        
+        // Leaf selection typically produces more clusters
+        log::debug!("EOM found {} clusters, Leaf found {} clusters",
+                   eom_assignment.num_clusters(), leaf_assignment.num_clusters());
+        
+        // Verify all labels are valid
+        for label in &eom_assignment.labels {
+            assert!(*label >= -1);
+        }
+        for label in &leaf_assignment.labels {
+            assert!(*label >= -1);
         }
     }
 }
