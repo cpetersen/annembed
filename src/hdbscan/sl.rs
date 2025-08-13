@@ -112,7 +112,7 @@ impl<F: Float + PartialOrd> Ord for Edge<F> {
 /// It is constructed from a Hnsw
 pub struct SLclustering<NodeIdx: PrimInt, F: Float> {
     // the kgraph summary provided by hnsw
-    kgraph: KGraph<F>,
+    pub kgraph: KGraph<F>,
     //
     dendrogram: Dendrogram<NodeIdx, F>,
     // ask for at most nbcluster. We can stop if we get in nbcluster union steps
@@ -281,8 +281,15 @@ where
         let mut hierarchy = ClusterHierarchy::new(num_points);
         let mut uf = HierarchicalUnionFind::<usize>::new(num_points);
         
+        // Track which points have been added to the hierarchy
+        let mut points_in_tree = std::collections::HashSet::new();
+        
         // Process edges in order of increasing weight
         for (node_a, node_b, weight) in sorted_edges {
+            // Track points that are in the tree
+            points_in_tree.insert(node_a);
+            points_in_tree.insert(node_b);
+            
             // Find representatives of the two nodes
             let rep_a = uf.find(node_a);
             let rep_b = uf.find(node_b);
@@ -314,7 +321,52 @@ where
             uf.update_node_mapping(new_rep, new_cluster_id);
         }
         
-        log::info!("Built hierarchy with {} nodes", hierarchy.num_nodes());
+        // Handle disconnected points - connect them at infinite distance
+        // Find all points not in the tree
+        let mut disconnected_points: Vec<usize> = Vec::new();
+        for i in 0..num_points {
+            if !points_in_tree.contains(&i) {
+                disconnected_points.push(i);
+                // Each disconnected point starts as its own cluster in hierarchy
+                // (This is already done in hierarchy initialization)
+            }
+        }
+        
+        // If we have disconnected components, we need to connect them at the end
+        // This simulates infinite distance merges
+        if !disconnected_points.is_empty() || points_in_tree.len() < num_points {
+            log::warn!("Found {} disconnected points out of {} total points", 
+                      num_points - points_in_tree.len(), num_points);
+            
+            // Find all root clusters (representatives that haven't been merged)
+            let mut roots = Vec::new();
+            for i in 0..num_points {
+                if uf.find(i) == i {
+                    if let Some(node_id) = uf.get_node_id(i) {
+                        roots.push((i, node_id));
+                    }
+                }
+            }
+            
+            // If we have multiple roots, merge them at very small lambda (large distance)
+            if roots.len() > 1 {
+                let very_small_lambda = F::from(1e-10).unwrap();
+                let mut current_root = roots[0];
+                
+                for i in 1..roots.len() {
+                    let next_root = roots[i];
+                    // Merge in hierarchy
+                    let new_cluster_id = hierarchy.merge(current_root.1, next_root.1, very_small_lambda);
+                    // Union in UF
+                    let new_rep = uf.union(current_root.0, next_root.0);
+                    uf.update_node_mapping(new_rep, new_cluster_id);
+                    current_root = (new_rep, new_cluster_id);
+                }
+            }
+        }
+        
+        log::info!("Built hierarchy with {} nodes, included {} points", 
+                  hierarchy.num_nodes(), points_in_tree.len());
         
         hierarchy
     }
