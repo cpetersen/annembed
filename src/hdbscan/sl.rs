@@ -332,36 +332,33 @@ where
             }
         }
         
-        // If we have disconnected components, we need to connect them at the end
-        // This simulates infinite distance merges
-        if !disconnected_points.is_empty() || points_in_tree.len() < num_points {
-            log::warn!("Found {} disconnected points out of {} total points", 
-                      num_points - points_in_tree.len(), num_points);
-            
-            // Find all root clusters (representatives that haven't been merged)
-            let mut roots = Vec::new();
-            for i in 0..num_points {
-                if uf.find(i) == i {
-                    if let Some(node_id) = uf.get_node_id(i) {
-                        roots.push((i, node_id));
-                    }
+        // Check for disconnected components - ALWAYS check, even if all points were in edges
+        // because the MST might have multiple trees
+        let mut roots = Vec::new();
+        for i in 0..num_points {
+            if uf.find(i) == i {
+                if let Some(node_id) = uf.get_node_id(i) {
+                    roots.push((i, node_id));
                 }
             }
+        }
+        
+        // If we have multiple roots, we have disconnected components that need to be merged
+        if roots.len() > 1 {
+            log::warn!("Found {} disconnected components in MST", roots.len());
             
-            // If we have multiple roots, merge them at very small lambda (large distance)
-            if roots.len() > 1 {
-                let very_small_lambda = F::from(1e-10).unwrap();
-                let mut current_root = roots[0];
-                
-                for i in 1..roots.len() {
-                    let next_root = roots[i];
-                    // Merge in hierarchy
-                    let new_cluster_id = hierarchy.merge(current_root.1, next_root.1, very_small_lambda);
-                    // Union in UF
-                    let new_rep = uf.union(current_root.0, next_root.0);
-                    uf.update_node_mapping(new_rep, new_cluster_id);
-                    current_root = (new_rep, new_cluster_id);
-                }
+            // Merge all components at very small lambda (large distance)
+            let very_small_lambda = F::from(1e-10).unwrap();
+            let mut current_root = roots[0];
+            
+            for i in 1..roots.len() {
+                let next_root = roots[i];
+                // Merge in hierarchy
+                let new_cluster_id = hierarchy.merge(current_root.1, next_root.1, very_small_lambda);
+                // Union in UF
+                let new_rep = uf.union(current_root.0, next_root.0);
+                uf.update_node_mapping(new_rep, new_cluster_id);
+                current_root = (new_rep, new_cluster_id);
             }
         }
         
