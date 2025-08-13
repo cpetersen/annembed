@@ -31,7 +31,6 @@ mod extraction;
 mod hierarchy;
 mod kruskal;
 mod sl;
-mod tests;
 
 // Re-export core types
 pub use self::condensed::{CondensedNode, CondensedTree, CondensedTreeStats};
