@@ -153,32 +153,6 @@ impl<F: Float> CondensedTree<F> {
         }
     }
     
-    /// Collect all points in a subtree
-    fn collect_subtree_points(&self, node_idx: usize, points: &mut std::collections::HashSet<usize>) {
-        // Check for invalid index
-        if node_idx >= self.nodes.len() {
-            log::error!("Invalid node index {} in collect_subtree_points", node_idx);
-            return;
-        }
-        
-        // Add points directly in this node
-        for &point in &self.nodes[node_idx].points {
-            points.insert(point);
-        }
-        // Add points that fell out from this node
-        for &(point, _) in &self.nodes[node_idx].points_fallen {
-            points.insert(point);
-        }
-        // Recursively add points from children
-        for &child_idx in &self.nodes[node_idx].child_nodes {
-            if child_idx == node_idx {
-                log::error!("Node {} is its own child!", node_idx);
-                continue;
-            }
-            self.collect_subtree_points(child_idx, points);
-        }
-    }
-    
     /// Recursively condense the hierarchy
     /// Returns the condensed node id if a node was created
     fn condense_recursive(
