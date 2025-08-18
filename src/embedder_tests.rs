@@ -4,11 +4,10 @@
 mod tests {
     use super::super::*;
     use crate::fromhnsw::kgraph::kgraph_from_hnsw_all;
-    use hnsw_rs::prelude::*;
     use ndarray::Array2;
     use rand::distr::Uniform;
-    use rand::prelude::*;
-    use rand_distr::Distribution;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
 
     /// Generate simple test data
     fn generate_test_data(n_points: usize, n_dims: usize) -> Vec<Vec<f32>> {
@@ -220,7 +219,7 @@ mod tests {
             node_params_vec.push(NodeParam::new(1.0, edges));
         }
         
-        let node_params = NodeParams::new(node_params_vec, max_nbng);
+        let _node_params = NodeParams::new(node_params_vec, max_nbng);
         
         // Test with fixed seed
         let mut params = EmbedderParams::default();
@@ -230,7 +229,7 @@ mod tests {
         params.random_seed = Some(42);
         
         // Create initial embedding
-        let initial_embedding = Array2::<f64>::zeros((n_nodes, 2));
+        let _initial_embedding = Array2::<f64>::zeros((n_nodes, 2));
         
         // Run entropy optimization multiple times - simplified test
         // Note: EntropyOptim methods are not public, so we can't directly test it
@@ -242,7 +241,7 @@ mod tests {
 
     #[test] 
     fn test_random_init_reproducibility() {
-        // Test the get_random_init function specifically
+        // Test that random initialization is reproducible with same seed
         let data = generate_test_data(20, 10);
         let hnsw = build_hnsw(&data);
         let kgraph = kgraph_from_hnsw_all::<f32, DistL2, f32>(&hnsw, 5).unwrap();
@@ -252,12 +251,14 @@ mod tests {
         params.random_seed = Some(42);
         params.dmap_init = false; // Force random initialization
         
-        // Create embedders and get random init
+        // Create embedders and run embedding with random init
         let mut results = Vec::new();
         for _ in 0..3 {
-            let embedder = Embedder::new(&kgraph, params);
-            let init = embedder.get_random_init(1.0);
-            results.push(init);
+            let mut embedder = Embedder::new(&kgraph, params);
+            // Run embedding which will use random init internally
+            let _ = embedder.embed().unwrap();
+            let embedding = embedder.get_embedded().unwrap();
+            results.push(embedding.clone());
         }
         
         // Check all are identical

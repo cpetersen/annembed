@@ -331,14 +331,25 @@ where
             set_data_box(&mut initial_embedding, F::from(10.).unwrap());
         } else {
             // if we use random initialization we must have a box size coherent with renormalizes scales, so box size is 1.
+            // We need to set initial_space first before calling get_random_init
+            self.initial_space = Some(to_proba_edges(
+                graph_to_embed,
+                self.parameters.scale_rho as f32,
+                self.parameters.beta as f32,
+            ));
             initial_embedding = self.get_random_init(1.);
         }
         //
-        self.initial_space = Some(to_proba_edges(
-            graph_to_embed,
-            self.parameters.scale_rho as f32,
-            self.parameters.beta as f32,
-        ));
+        // If using dmap_init and old dmaps, initial_space is already set above
+        // If not using dmap_init, it was set above before get_random_init
+        // If using dmap_init and new dmaps, we need to set it here
+        if self.initial_space.is_none() {
+            self.initial_space = Some(to_proba_edges(
+                graph_to_embed,
+                self.parameters.scale_rho as f32,
+                self.parameters.beta as f32,
+            ));
+        }
         let embedding_res = self.entropy_optimize(&self.parameters, &initial_embedding);
         // optional store dump initial embedding
         self.initial_embedding = Some(initial_embedding);
