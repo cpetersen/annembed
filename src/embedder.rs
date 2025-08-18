@@ -1369,3 +1369,8 @@ mod tests {
         assert!(embed_res.is_ok());
     } // end of mini_embed_full
 } // end of tests
+
+// Include the new test module
+#[cfg(test)]
+#[path = "embedder_tests.rs"]
+mod embedder_tests;

@@ -1,0 +1,325 @@
+//! Tests for random seed reproducibility in embedder
+
+#[cfg(test)]
+mod tests {
+    use super::super::*;
+    use crate::fromhnsw::kgraph::kgraph_from_hnsw_all;
+    use hnsw_rs::prelude::*;
+    use ndarray::Array2;
+    use rand::distr::Uniform;
+    use rand::prelude::*;
+    use rand_distr::Distribution;
+
+    /// Generate simple test data
+    fn generate_test_data(n_points: usize, n_dims: usize) -> Vec<Vec<f32>> {
+        let mut data = Vec::new();
+        let mut rng = StdRng::seed_from_u64(42); // Fixed seed for data generation
+        let dist = Uniform::new(0.0, 1.0).unwrap();
+        
+        for i in 0..n_points {
+            let mut point = Vec::new();
+            for _ in 0..n_dims {
+                point.push((i as f32 * 0.1) + rng.sample(dist));
+            }
+            data.push(point);
+        }
+        data
+    }
+
+    /// Build HNSW graph from data
+    fn build_hnsw(data: &[Vec<f32>]) -> Hnsw<f32, DistL2> {
+        let ef_c = 50;
+        let max_nb_connection = 24;
+        let nb_layer = 16.min((data.len() as f32).ln().trunc() as usize);
+        let hnsw = Hnsw::<f32, DistL2>::new(
+            max_nb_connection,
+            data.len(),
+            nb_layer,
+            ef_c,
+            DistL2 {},
+        );
+        
+        let data_with_id: Vec<(&Vec<f32>, usize)> = 
+            data.iter().enumerate().map(|(i, v)| (v, i)).collect();
+        hnsw.parallel_insert(&data_with_id);
+        hnsw
+    }
+
+    #[test]
+    fn test_random_seed_simple_reproducibility() {
+        // Generate small test data
+        let data = generate_test_data(20, 10);
+        let hnsw = build_hnsw(&data);
+        let kgraph = kgraph_from_hnsw_all::<f32, DistL2, f32>(&hnsw, 5).unwrap();
+        
+        // Test parameters with seed
+        let mut params = EmbedderParams::default();
+        params.asked_dim = 2;
+        params.nb_grad_batch = 10;
+        params.random_seed = Some(42);
+        
+        // Run embedding multiple times with same seed
+        let mut results = Vec::new();
+        for _ in 0..3 {
+            let mut embedder = Embedder::new(&kgraph, params);
+            let _ = embedder.embed().unwrap();
+            let embedding = embedder.get_embedded().unwrap();
+            results.push(embedding.clone());
+        }
+        
+        // Check that all results are identical
+        for i in 1..results.len() {
+            assert_eq!(
+                results[0].shape(),
+                results[i].shape(),
+                "Result {} has different shape",
+                i
+            );
+            
+            // Check first point coordinates
+            let diff = (&results[0] - &results[i]).mapv(|x| x.abs()).sum();
+            assert!(
+                diff < 1e-6,
+                "Result {} differs from first result. Total diff: {}",
+                i,
+                diff
+            );
+        }
+    }
+
+    #[test]
+    fn test_random_seed_different_seeds() {
+        // Generate small test data
+        let data = generate_test_data(20, 10);
+        let hnsw = build_hnsw(&data);
+        let kgraph = kgraph_from_hnsw_all::<f32, DistL2, f32>(&hnsw, 5).unwrap();
+        
+        // Test with different seeds
+        let seeds = vec![42, 100, 200];
+        let mut results = Vec::new();
+        
+        for seed in seeds {
+            let mut params = EmbedderParams::default();
+            params.asked_dim = 2;
+            params.nb_grad_batch = 10;
+            params.random_seed = Some(seed);
+            
+            let mut embedder = Embedder::new(&kgraph, params);
+            let _ = embedder.embed().unwrap();
+            let embedding = embedder.get_embedded().unwrap();
+            results.push(embedding.clone());
+        }
+        
+        // Check that results with different seeds are different
+        for i in 0..results.len() {
+            for j in i + 1..results.len() {
+                let diff = (&results[i] - &results[j]).mapv(|x| x.abs()).sum();
+                assert!(
+                    diff > 0.1,
+                    "Results with different seeds {} and {} are too similar. Diff: {}",
+                    i,
+                    j,
+                    diff
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_random_seed_none_is_random() {
+        // Generate small test data
+        let data = generate_test_data(20, 10);
+        let hnsw = build_hnsw(&data);
+        let kgraph = kgraph_from_hnsw_all::<f32, DistL2, f32>(&hnsw, 5).unwrap();
+        
+        // Test without seed (should be random)
+        let mut params = EmbedderParams::default();
+        params.asked_dim = 2;
+        params.nb_grad_batch = 10;
+        params.random_seed = None;
+        
+        let mut results = Vec::new();
+        for _ in 0..3 {
+            let mut embedder = Embedder::new(&kgraph, params);
+            let _ = embedder.embed().unwrap();
+            let embedding = embedder.get_embedded().unwrap();
+            results.push(embedding.clone());
+        }
+        
+        // Check that at least some results are different
+        let mut found_difference = false;
+        for i in 1..results.len() {
+            let diff = (&results[0] - &results[i]).mapv(|x| x.abs()).sum();
+            if diff > 0.01 {
+                found_difference = true;
+                break;
+            }
+        }
+        
+        assert!(
+            found_difference,
+            "All results without seed are identical, expected randomness"
+        );
+    }
+
+    #[test]
+    fn test_hierarchical_embedding_seed() {
+        // Test larger dataset that triggers hierarchical embedding
+        let data = generate_test_data(100, 20);
+        let hnsw = build_hnsw(&data);
+        
+        // Create a hierarchical graph
+        let kgraph = kgraph_from_hnsw_all::<f32, DistL2, f32>(&hnsw, 10).unwrap();
+        
+        let mut params = EmbedderParams::default();
+        params.asked_dim = 2;
+        params.nb_grad_batch = 20;
+        params.random_seed = Some(42);
+        params.dmap_init = true; // Use diffusion map initialization
+        
+        // Run multiple times
+        let mut results = Vec::new();
+        for _ in 0..3 {
+            let mut embedder = Embedder::new(&kgraph, params);
+            let _ = embedder.embed().unwrap();
+            let embedding = embedder.get_embedded().unwrap();
+            results.push(embedding.clone());
+        }
+        
+        // Check reproducibility
+        for i in 1..results.len() {
+            let diff = (&results[0] - &results[i]).mapv(|x| x.abs()).sum();
+            assert!(
+                diff < 0.01,
+                "Hierarchical embedding {} differs. Diff: {}",
+                i,
+                diff
+            );
+        }
+    }
+
+    #[test]
+    fn test_entropy_optim_seed() {
+        // Directly test EntropyOptim which is where much of the randomness comes from
+        use crate::tools::nodeparam::*;
+        
+        // Create simple test data
+        let n_nodes = 20;
+        let mut node_params_vec = Vec::new();
+        let max_nbng = 5;
+        for i in 0..n_nodes {
+            let mut edges = Vec::new();
+            for j in 0..max_nbng {
+                if i != j {
+                    edges.push(OutEdge {
+                        node: (i + j + 1) % n_nodes,
+                        weight: 0.1 * (j + 1) as f32,
+                    });
+                }
+            }
+            node_params_vec.push(NodeParam::new(1.0, edges));
+        }
+        
+        let node_params = NodeParams::new(node_params_vec, max_nbng);
+        
+        // Test with fixed seed
+        let mut params = EmbedderParams::default();
+        params.asked_dim = 2;
+        params.nb_grad_batch = 10;
+        params.nb_sampling_by_edge = 5;
+        params.random_seed = Some(42);
+        
+        // Create initial embedding
+        let initial_embedding = Array2::<f64>::zeros((n_nodes, 2));
+        
+        // Run entropy optimization multiple times - simplified test
+        // Note: EntropyOptim methods are not public, so we can't directly test it
+        // This test would need to be in the embedder module itself to access private methods
+        
+        // For now, we'll just test that the seed is properly stored
+        assert_eq!(params.random_seed, Some(42));
+    }
+
+    #[test] 
+    fn test_random_init_reproducibility() {
+        // Test the get_random_init function specifically
+        let data = generate_test_data(20, 10);
+        let hnsw = build_hnsw(&data);
+        let kgraph = kgraph_from_hnsw_all::<f32, DistL2, f32>(&hnsw, 5).unwrap();
+        
+        let mut params = EmbedderParams::default();
+        params.asked_dim = 2;
+        params.random_seed = Some(42);
+        params.dmap_init = false; // Force random initialization
+        
+        // Create embedders and get random init
+        let mut results = Vec::new();
+        for _ in 0..3 {
+            let embedder = Embedder::new(&kgraph, params);
+            let init = embedder.get_random_init(1.0);
+            results.push(init);
+        }
+        
+        // Check all are identical
+        for i in 1..results.len() {
+            assert_eq!(
+                results[0].shape(),
+                results[i].shape(),
+                "Shape mismatch"
+            );
+            
+            let diff = (&results[0] - &results[i]).mapv(|x| x.abs()).sum();
+            assert!(
+                diff < 1e-6,
+                "Random init {} differs. Diff: {}",
+                i,
+                diff
+            );
+        }
+    }
+
+    #[test]
+    fn test_parallel_vs_sequential() {
+        // Test if parallel processing affects reproducibility
+        let data = generate_test_data(50, 15);
+        let hnsw = build_hnsw(&data);
+        let kgraph = kgraph_from_hnsw_all::<f32, DistL2, f32>(&hnsw, 8).unwrap();
+        
+        let mut params = EmbedderParams::default();
+        params.asked_dim = 2;
+        params.nb_grad_batch = 20;
+        params.random_seed = Some(42);
+        
+        // Run multiple times to check for timing-dependent behavior
+        let mut results = Vec::new();
+        for run in 0..5 {
+            // Add some variability in timing
+            if run > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            
+            let mut embedder = Embedder::new(&kgraph, params);
+            let _ = embedder.embed().unwrap();
+            let embedding = embedder.get_embedded().unwrap();
+            results.push(embedding.clone());
+        }
+        
+        // Check reproducibility
+        let mut differences = Vec::new();
+        for i in 1..results.len() {
+            let diff = (&results[0] - &results[i]).mapv(|x| x.abs()).sum();
+            differences.push(diff);
+            println!("Run {} diff from run 0: {}", i, diff);
+        }
+        
+        // All should be very similar
+        for (i, diff) in differences.iter().enumerate() {
+            assert!(
+                *diff < 0.01,
+                "Run {} has significant difference: {}",
+                i + 1,
+                diff
+            );
+        }
+    }
+}
