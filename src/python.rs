@@ -32,6 +32,7 @@ struct HnswArgs {
     ef: usize,
     knbn: usize,
     scale_mod: f64,
+    seed: Option<u64>,
 }
 
 impl HnswArgs {
@@ -62,9 +63,12 @@ fn build_kgraph(
 ) -> KGraph<f64> {
     with_dist!(hp.distance, D, {
         let n = pairs.len();
-        let mut h = Hnsw::<f64, D>::new(hp.max_conn, n, nb_layer, hp.ef, D::default());
+        let mut h = match hp.seed {
+            Some(seed) => Hnsw::<f64, D>::new_with_seed(hp.max_conn, n, nb_layer, hp.ef, D::default(), seed),
+            None => Hnsw::<f64, D>::new(hp.max_conn, n, nb_layer, hp.ef, D::default()),
+        };
         h.modify_level_scale(hp.scale_mod);
-        h.parallel_insert(pairs);
+        h.parallel_insert(pairs);  // Smart defaults will handle serial vs parallel
         kgraph_from_hnsw_all(&h, hp.knbn).expect("k-graph construction failed")
     })
 }
@@ -77,9 +81,12 @@ fn build_kgraph_proj(
 ) -> KGraphProjection<f64> {
     with_dist!(hp.distance, D, {
         let n = pairs.len();
-        let mut h = Hnsw::<f64, D>::new(hp.max_conn, n, nb_layer, hp.ef, D::default());
+        let mut h = match hp.seed {
+            Some(seed) => Hnsw::<f64, D>::new_with_seed(hp.max_conn, n, nb_layer, hp.ef, D::default(), seed),
+            None => Hnsw::<f64, D>::new(hp.max_conn, n, nb_layer, hp.ef, D::default()),
+        };
         h.modify_level_scale(hp.scale_mod);
-        h.parallel_insert(pairs);
+        h.parallel_insert(pairs);  // Smart defaults will handle serial vs parallel
         KGraphProjection::<f64>::new(&h, hp.knbn, proj_layer)
     })
 }
@@ -104,7 +111,8 @@ fn build_kgraph_proj(
     nbconn = 64,
     ef = 512,
     knbn = 10,
-    scale_modification = 1.0
+    scale_modification = 1.0,
+    seed = None
 ))]
 fn embed(
     py: Python,
@@ -122,6 +130,7 @@ fn embed(
     ef: usize,
     knbn: usize,
     scale_modification: f64,
+    seed: Option<u64>,
 ) -> PyResult<Py<PyAny>> {
     if delim.chars().count() != 1 {
         return Err(PyValueError::new_err("`delim` must be a single character"));
@@ -129,7 +138,8 @@ fn embed(
 
     let hp = HnswArgs { distance: distance.into(),
                         max_conn: nbconn, ef, knbn,
-                        scale_mod: scale_modification };
+                        scale_mod: scale_modification,
+                        seed };
     hp.validate().map_err(PyValueError::new_err)?;
 
     // 1. Load data
@@ -196,7 +206,8 @@ fn embed(
     nbconn = 64,
     ef = 512,
     knbn = 10,
-    scale_modification = 1.0
+    scale_modification = 1.0,
+    seed = None
 ))]
 fn dmap_embed(
     py: Python,
@@ -214,6 +225,7 @@ fn dmap_embed(
     ef: usize,
     knbn: usize,
     scale_modification: f64,
+    seed: Option<u64>,
 ) -> PyResult<Py<PyAny>> {
     if delim.chars().count() != 1 {
         return Err(PyValueError::new_err("`delim` must be a single character"));
@@ -221,7 +233,8 @@ fn dmap_embed(
 
     let hp = HnswArgs { distance: distance.into(),
                         max_conn: nbconn, ef, knbn,
-                        scale_mod: scale_modification };
+                        scale_mod: scale_modification,
+                        seed };
     hp.validate().map_err(PyValueError::new_err)?;
 
     // 1. Load data
