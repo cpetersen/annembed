@@ -43,6 +43,28 @@ mod tests {
         hnsw.parallel_insert(&data_with_id);
         hnsw
     }
+    
+    /// Build HNSW graph from data with a seed for reproducibility
+    fn build_hnsw_with_seed(data: &[Vec<f32>], seed: u64) -> Hnsw<f32, DistL2> {
+        let ef_c = 50;
+        let max_nb_connection = 24;
+        let nb_layer = 16.min((data.len() as f32).ln().trunc() as usize);
+        let hnsw = Hnsw::<f32, DistL2>::new_with_seed(
+            max_nb_connection,
+            data.len(),
+            nb_layer,
+            ef_c,
+            DistL2 {},
+            seed,
+        );
+        
+        // With smart defaults in hnswlib-rs, parallel_insert will automatically
+        // use serial insertion internally when HNSW was created with a seed
+        let data_with_id: Vec<(&Vec<f32>, usize)> = 
+            data.iter().enumerate().map(|(i, v)| (v, i)).collect();
+        hnsw.parallel_insert(&data_with_id);
+        hnsw
+    }
 
     #[test]
     fn test_random_seed_simple_reproducibility() {
@@ -322,5 +344,105 @@ mod tests {
                 diff
             );
         }
+    }
+    
+    #[test]
+    fn test_full_reproducibility_with_seeded_hnsw() {
+        // Test complete reproducibility: both HNSW and embedder use seeds
+        println!("\n\ntest_full_reproducibility_with_seeded_hnsw");
+        
+        // Generate test data with fixed seed
+        let data = generate_test_data(50, 15);
+        
+        // Seeds for reproducibility
+        let hnsw_seed = 12345;
+        let embedder_seed = 67890;
+        
+        // Create multiple runs with same seeds
+        let mut results = Vec::new();
+        for run in 0..3 {
+            println!("Run {}", run);
+            
+            // Build HNSW with seed for reproducible layer assignments
+            let hnsw = build_hnsw_with_seed(&data, hnsw_seed);
+            let kgraph = kgraph_from_hnsw_all::<f32, DistL2, f32>(&hnsw, 8).unwrap();
+            
+            // Set embedder parameters with seed
+            let mut params = EmbedderParams::default();
+            params.asked_dim = 2;
+            params.nb_grad_batch = 20;
+            params.random_seed = Some(embedder_seed);
+            
+            // Run embedding
+            let mut embedder = Embedder::new(&kgraph, params);
+            let _ = embedder.embed().unwrap();
+            let embedding = embedder.get_embedded().unwrap();
+            results.push(embedding.clone());
+        }
+        
+        // Verify all runs produce identical results
+        println!("\nChecking reproducibility across runs:");
+        for i in 1..results.len() {
+            let diff = (&results[0] - &results[i]).mapv(|x| x.abs()).sum();
+            println!("Run {} diff from run 0: {}", i, diff);
+            
+            // With both seeds fixed, results should be EXACTLY identical
+            assert!(
+                diff < 1e-10,  // Very strict tolerance for identical computation
+                "Run {} differs from run 0 by {}. Expected exact reproducibility with fixed seeds.",
+                i,
+                diff
+            );
+        }
+        
+        println!("✅ Full reproducibility achieved with seeded HNSW and embedder!");
+    }
+    
+    #[test]
+    fn test_hnsw_seed_affects_embedding() {
+        // Test that different HNSW seeds produce different embeddings
+        println!("\n\ntest_hnsw_seed_affects_embedding");
+        
+        // Generate test data
+        let data = generate_test_data(30, 10);
+        
+        // Fixed embedder seed
+        let embedder_seed = 42;
+        
+        // Create embeddings with different HNSW seeds
+        let hnsw_seeds = vec![100, 200, 300];
+        let mut results = Vec::new();
+        
+        for hnsw_seed in &hnsw_seeds {
+            let hnsw = build_hnsw_with_seed(&data, *hnsw_seed);
+            let kgraph = kgraph_from_hnsw_all::<f32, DistL2, f32>(&hnsw, 5).unwrap();
+            
+            let mut params = EmbedderParams::default();
+            params.asked_dim = 2;
+            params.nb_grad_batch = 10;
+            params.random_seed = Some(embedder_seed);
+            
+            let mut embedder = Embedder::new(&kgraph, params);
+            let _ = embedder.embed().unwrap();
+            let embedding = embedder.get_embedded().unwrap();
+            results.push(embedding.clone());
+        }
+        
+        // Verify that different HNSW seeds lead to different embeddings
+        let mut found_difference = false;
+        for i in 0..results.len() {
+            for j in i + 1..results.len() {
+                let diff = (&results[i] - &results[j]).mapv(|x| x.abs()).sum();
+                println!("HNSW seed {} vs {}: diff = {}", hnsw_seeds[i], hnsw_seeds[j], diff);
+                if diff > 0.01 {
+                    found_difference = true;
+                }
+            }
+        }
+        
+        assert!(
+            found_difference,
+            "Different HNSW seeds should produce different embeddings due to different graph structures"
+        );
     }
 }

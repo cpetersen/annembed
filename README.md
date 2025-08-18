@@ -206,6 +206,60 @@ Sources of examples are in corresponding directory.
     embedder = Embedder::new(&kgraph, embed_params);
     let embed_res = embedder.embed();
 ```
+
+### Reproducibility and Performance Trade-offs
+
+The library now supports reproducible embeddings through seeded HNSW construction, with smart defaults that automatically optimize for either reproducibility or performance:
+
+#### Smart Defaults
+
+When using `hnsw_rs` with the updated smart defaults:
+
+- **With seed**: HNSW automatically uses deterministic mode, making `parallel_insert()` use serial insertion internally for reproducibility
+- **Without seed**: HNSW uses fast parallel insertion for maximum performance (2-8x speedup on multi-core systems)
+
+```rust
+// Reproducible embedding with seed
+let hnsw = Hnsw::<f32, DistL2>::new_with_seed(
+    max_nb_connection, nbimages, nb_layer, ef_c, DistL2{}, seed
+);
+hnsw.parallel_insert(&data_with_id);  // Automatically uses serial insertion
+
+// Fast embedding without seed
+let hnsw = Hnsw::<f32, DistL2>::new(
+    max_nb_connection, nbimages, nb_layer, ef_c, DistL2{}
+);
+hnsw.parallel_insert(&data_with_id);  // Uses true parallel insertion
+```
+
+#### Embedder with Random Seed
+
+For end-to-end reproducibility, also set the random seed in `EmbedderParams`:
+
+```rust
+let mut embed_params = EmbedderParams::new();
+embed_params.random_seed = Some(42);  // For reproducible embeddings
+// ... other parameters
+```
+
+#### Performance Considerations
+
+- **Serial insertion (deterministic)**: Ensures reproducibility but slower
+- **Parallel insertion (non-deterministic)**: 2-8x faster on multi-core systems
+- **Recommendation**: Use seeded construction for testing/debugging, unseeded for production
+
+#### Python API
+
+The Python bindings also support seed parameters:
+
+```python
+# Reproducible embedding
+arr = annembed.embed("data.csv", dim=2, seed=42)
+
+# Fast embedding (no seed)
+arr = annembed.embed("data.csv", dim=2)
+```
+
 ### Usage in Python
 ```bash
 pip install annembed_rs
