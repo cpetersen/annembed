@@ -30,7 +30,8 @@ use rayon::prelude::*;
 use std::sync::Arc;
 
 use rand::distr::Uniform;
-use rand::{Rng, rng};
+use rand::{Rng, SeedableRng, rng};
+use rand::rngs::StdRng;
 use rand_distr::weighted::WeightedAliasIndex;
 use rand_distr::{Distribution, Normal};
 
@@ -157,6 +158,14 @@ where
         }
     }
 
+    /// Create RNG based on seed parameter
+    fn create_rng(&self) -> StdRng {
+        match self.parameters.random_seed {
+            Some(seed) => StdRng::seed_from_u64(seed),
+            None => StdRng::from_rng(&mut rng()),
+        }
+    }
+
     /// dispatch to one_step embed or hierarchical embedding
     pub fn embed(&mut self) -> Result<usize, usize> {
         if self.kgraph.is_some() {
@@ -223,7 +232,7 @@ where
         log::info!("doing projection");
         let (nb_nodes_small, _) = first_embedding.dim();
         // we were cautious on indexation so we can do:
-        let mut rng = rand::rng();
+        let mut rng = self.create_rng();
         for i in 0..nb_nodes_small {
             for j in 0..dim {
                 second_step_init[[i, j]] = first_embedding[[i, j]];
@@ -435,7 +444,7 @@ where
         let nb_nodes = self.initial_space.as_ref().unwrap().get_nb_nodes();
         let mut initial_embedding = Array2::<F>::zeros((nb_nodes, self.get_asked_dimension()));
         let unif = Uniform::<f32>::new(-size / 2., size / 2.).unwrap();
-        let mut rng = rand::rng();
+        let mut rng = self.create_rng();
         for i in 0..nb_nodes {
             for j in 0..self.get_asked_dimension() {
                 initial_embedding[[i, j]] = F::from(rng.sample(unif)).unwrap();
@@ -762,7 +771,7 @@ where
                 " initial_space not constructed, no NodeParams",
             ));
         }
-        let ce_optimization = EntropyOptim::new(
+        let mut ce_optimization = EntropyOptim::new(
             self.initial_space.as_ref().unwrap(),
             params,
             initial_embedding,
@@ -846,6 +855,8 @@ struct EntropyOptim<'a, F> {
     pos_edge_distribution: WeightedAliasIndex<f32>,
     /// embedding parameters
     params: &'a EmbedderParams,
+    /// random number generator for reproducible sampling
+    rng: StdRng,
 } // end of EntropyOptim
 
 impl<'a, F> EntropyOptim<'a, F>
@@ -908,6 +919,11 @@ where
             scales_q.query(0.99).unwrap().1
         );
         log::debug!("");
+        // Create RNG based on seed parameter
+        let rng = match params.random_seed {
+            Some(seed) => StdRng::seed_from_u64(seed),
+            None => StdRng::from_rng(&mut rng()),
+        };
         //
         EntropyOptim {
             node_params,
@@ -916,6 +932,7 @@ where
             embedded_scales,
             pos_edge_distribution: pos_edge_sampler,
             params,
+            rng,
         }
         // construct field embedded
     } // end of new
@@ -1050,7 +1067,7 @@ where
 
     // TODO : pass functions corresponding to edge_weight and grad_edge_weight as arguments to test others weight function
     /// This function optimize cross entropy for Shannon cross entropy
-    fn ce_optim_edge_shannon(&self, threaded: bool, grad_step: f64)
+    fn ce_optim_edge_shannon(&mut self, threaded: bool, grad_step: f64)
     where
         F: Float
             + NumAssign
@@ -1065,7 +1082,7 @@ where
         let node_j;
         let node_i;
         if threaded {
-            edge_idx_sampled = rand::rng().sample(&self.pos_edge_distribution);
+            edge_idx_sampled = self.rng.sample(&self.pos_edge_distribution);
             node_i = self.edges[edge_idx_sampled].0;
             node_j = self.edges[edge_idx_sampled].1.node;
             y_i = self.get_embedded_data(node_i).read().to_owned();
@@ -1073,7 +1090,7 @@ where
         }
         // end threaded
         else {
-            edge_idx_sampled = rand::rng().sample(&self.pos_edge_distribution);
+            edge_idx_sampled = self.rng.sample(&self.pos_edge_distribution);
             node_i = self.edges[edge_idx_sampled].0;
             y_i = self.get_embedded_data(node_i).write().to_owned();
             node_j = self.edges[edge_idx_sampled].1.node;
@@ -1128,7 +1145,7 @@ where
         let mut got_nb_neg = 0;
         let mut _nb_failed = 0;
         while got_nb_neg < asked_nb_neg {
-            let neg_node: NodeIdx = rng().random_range(0..self.embedded_scales.len());
+            let neg_node: NodeIdx = self.rng.random_range(0..self.embedded_scales.len());
             if neg_node != node_i
                 && neg_node != node_j
                 && self
@@ -1187,16 +1204,17 @@ where
     } // end of ce_optim_from_point
 
     #[allow(unused)]
-    fn gradient_iteration(&self, nb_sample: usize, grad_step: f64) {
+    fn gradient_iteration(&mut self, nb_sample: usize, grad_step: f64) {
         for _ in 0..nb_sample {
             self.ce_optim_edge_shannon(false, grad_step);
         }
     } // end of gradient_iteration
 
-    fn gradient_iteration_threaded(&self, nb_sample: usize, grad_step: f64) {
-        (0..nb_sample)
-            .into_par_iter()
-            .for_each(|_| self.ce_optim_edge_shannon(true, grad_step));
+    fn gradient_iteration_threaded(&mut self, nb_sample: usize, grad_step: f64) {
+        // Cannot use par_iter with mutable self, need to handle differently
+        for _ in 0..nb_sample {
+            self.ce_optim_edge_shannon(true, grad_step);
+        }
     } // end of gradient_iteration_threaded
 } // end of impl EntropyOptim
 
