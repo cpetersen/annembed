@@ -332,11 +332,32 @@ where
                 sys_start.elapsed().unwrap().as_millis(),
                 cpu_start.elapsed().as_millis()
             );
-            set_data_box(&mut initial_embedding, F::from(10.).unwrap())
-                .map_err(|e| {
-                    log::error!("Failed to normalize initial embedding: {}", e);
-                    e
-                })?;
+            
+            // Check if diffusion map produced valid results
+            let is_valid = initial_embedding.iter()
+                .any(|&val| val != F::zero() && val.is_finite());
+            
+            if !is_valid {
+                log::warn!("Diffusion map initialization produced invalid results (all zeros or non-finite), falling back to random initialization");
+                // Fall back to random initialization  
+                // Need to set initial_space if not already set
+                if self.initial_space.is_none() {
+                    self.initial_space = Some(to_proba_edges(
+                        graph_to_embed,
+                        self.parameters.scale_rho as f32,
+                        self.parameters.beta as f32,
+                    ));
+                }
+                // Use the same random init method as the else branch
+                initial_embedding = self.get_random_init(1.);
+            } else {
+                // Normalize the diffusion map embedding
+                set_data_box(&mut initial_embedding, F::from(10.).unwrap())
+                    .map_err(|e| {
+                        log::error!("Failed to normalize initial embedding: {}", e);
+                        e
+                    })?;
+            }
         } else {
             // if we use random initialization we must have a box size coherent with renormalizes scales, so box size is 1.
             // We need to set initial_space first before calling get_random_init
@@ -797,7 +818,11 @@ where
         );
         // compute initial value of objective function
         let start = ProcessTime::now();
-        let initial_ce = ce_optimization.ce_compute_threaded();
+        let initial_ce = if params.random_seed.is_some() {
+            ce_optimization.ce_compute()
+        } else {
+            ce_optimization.ce_compute_threaded()
+        };
         let cpu_time: Duration = start.elapsed();
         log::info!(
             " initial cross entropy value {:.2e},  in time {:?}",
@@ -823,19 +848,34 @@ where
         );
         let cpu_start = ProcessTime::now();
         let sys_start = SystemTime::now();
-        for iter in 1..=self.get_nb_grad_batch() {
-            // loop on edges
-            let grad_step = grad_step_init * (1. - iter as f64 / self.get_nb_grad_batch() as f64);
-            ce_optimization.gradient_iteration_threaded(nb_sample_by_iter, grad_step);
-            //            let cpu_time: Duration = start.elapsed();
-            //            log::debug!("ce after grad iteration time(ms) {:.2e} grad iter {:.2e}",  cpu_time.as_millis(), ce_optimization.ce_compute_threaded());
+        
+        // Use serial execution when a random seed is set for reproducibility
+        if params.random_seed.is_some() {
+            log::info!("Using serial gradient iteration for reproducibility (random_seed is set)");
+            for iter in 1..=self.get_nb_grad_batch() {
+                // loop on edges
+                let grad_step = grad_step_init * (1. - iter as f64 / self.get_nb_grad_batch() as f64);
+                ce_optimization.gradient_iteration(nb_sample_by_iter, grad_step);
+            }
+        } else {
+            for iter in 1..=self.get_nb_grad_batch() {
+                // loop on edges
+                let grad_step = grad_step_init * (1. - iter as f64 / self.get_nb_grad_batch() as f64);
+                ce_optimization.gradient_iteration_threaded(nb_sample_by_iter, grad_step);
+                //            let cpu_time: Duration = start.elapsed();
+                //            log::debug!("ce after grad iteration time(ms) {:.2e} grad iter {:.2e}",  cpu_time.as_millis(), ce_optimization.ce_compute_threaded());
+            }
         }
         log::info!(
             " gradient iterations sys time(s) {:.2e} , cpu_time(s) {:.2e}",
             sys_start.elapsed().unwrap().as_secs(),
             cpu_start.elapsed().as_secs()
         );
-        let final_ce = ce_optimization.ce_compute_threaded();
+        let final_ce = if params.random_seed.is_some() {
+            ce_optimization.ce_compute()
+        } else {
+            ce_optimization.ce_compute_threaded()
+        };
         log::info!(" final cross entropy value {:.2e}", final_ce);
         // return reindexed data (if possible)
         let dim = self.get_asked_dimension();

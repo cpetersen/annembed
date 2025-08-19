@@ -58,11 +58,10 @@ mod tests {
             seed,
         );
         
-        // With smart defaults in hnswlib-rs, parallel_insert will automatically
-        // use serial insertion internally when HNSW was created with a seed
+        // Use serial insertion for reproducibility when created with a seed
         let data_with_id: Vec<(&Vec<f32>, usize)> = 
             data.iter().enumerate().map(|(i, v)| (v, i)).collect();
-        hnsw.parallel_insert(&data_with_id);
+        hnsw.serial_insert(&data_with_id);
         hnsw
     }
 
@@ -372,6 +371,7 @@ mod tests {
             params.asked_dim = 2;
             params.nb_grad_batch = 20;
             params.random_seed = Some(embedder_seed);
+            params.dmap_init = false; // Use random init for reproducibility test
             
             // Run embedding
             let mut embedder = Embedder::new(&kgraph, params);

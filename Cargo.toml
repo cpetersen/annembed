@@ -17,9 +17,9 @@ opt-level = 3
 
 [lib]
 # cargo rustc --lib -- --crate-type dylib [or staticlib] or rlib (default)
-# if we want to avoid specifying in advance crate-type 
+# if we want to avoid specifying in advance crate-type
 path = "src/lib.rs"
-name = "annembed"     
+name = "annembed"
 crate-type = ["rlib","cdylib"]
 
 [[examples]]
@@ -79,7 +79,7 @@ memory-stats = { version = "1.1", features = ["always_use_statm"] }
 # hnsw_rs = { git = "https://github.com/jean-pierreBoth/hnswlib-rs" }
 # hnsw_rs = { path = "../hnswlib-rs" }
 # hnsw_rs = { version = "0.3" }
-hnsw_rs = { git = "https://github.com/cpetersen/hnswlib-rs", branch = "random-seed" }
+hnsw_rs = { git = "https://github.com/cpetersen/hnswlib-rs", tag = "clusterkit-0.1.0" }
 
 
 # rand utilis
