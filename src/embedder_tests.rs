@@ -58,11 +58,10 @@ mod tests {
             seed,
         );
         
-        // With smart defaults in hnswlib-rs, parallel_insert will automatically
-        // use serial insertion internally when HNSW was created with a seed
+        // Use serial insertion for reproducibility when created with a seed
         let data_with_id: Vec<(&Vec<f32>, usize)> = 
             data.iter().enumerate().map(|(i, v)| (v, i)).collect();
-        hnsw.parallel_insert(&data_with_id);
+        hnsw.serial_insert(&data_with_id);
         hnsw
     }
 
@@ -347,7 +346,6 @@ mod tests {
     }
     
     #[test]
-    #[ignore] // TODO: Fix after resolving diffusion map initialization issues
     fn test_full_reproducibility_with_seeded_hnsw() {
         // Test complete reproducibility: both HNSW and embedder use seeds
         println!("\n\ntest_full_reproducibility_with_seeded_hnsw");
