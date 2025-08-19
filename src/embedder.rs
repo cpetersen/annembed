@@ -14,6 +14,7 @@
 //!  
 //!  in fact it is f32 or f64.
 
+use anyhow::anyhow;
 use num_traits::{Float, NumAssign};
 
 use ndarray::{Array1, Array2, ArrayView1};
@@ -167,10 +168,13 @@ where
     }
 
     /// dispatch to one_step embed or hierarchical embedding
-    pub fn embed(&mut self) -> Result<usize, usize> {
+    pub fn embed(&mut self) -> Result<usize, anyhow::Error> {
         if self.kgraph.is_some() {
             log::info!("doing one step embedding");
-            self.one_step_embed()
+            self.one_step_embed().map_err(|e| {
+                log::error!("one_step_embed failed: {}", e);
+                e
+            })
         } else {
             log::info!("doing 2 step embedding");
             self.h_embed()
@@ -178,10 +182,10 @@ where
     } // end of embed
 
     /// do hierarchical embedding on GraphPrrojection
-    pub fn h_embed(&mut self) -> Result<usize, usize> {
+    pub fn h_embed(&mut self) -> Result<usize, anyhow::Error> {
         if self.hkgraph.is_none() {
             log::error!("Embedder::h_embed , graph projection is none");
-            return Err(1);
+            return Err(anyhow!("Graph projection is not initialized"));
         }
         log::debug!("in h_embed");
         // one_step embed of the small graph.
@@ -198,7 +202,7 @@ where
         let sys_start = SystemTime::now();
         let res_first = embedder_first_step.one_step_embed();
         if res_first.is_err() {
-            log::error!("Embedder::h_embed first step failed");
+            log::error!("Embedder::h_embed first step failed: {:?}", res_first.as_ref().err());
             return res_first;
         }
         log::info!(
@@ -274,13 +278,13 @@ where
             }
             _ => {
                 log::error!("Embedder::embed : embedding optimization failed");
-                Err(1)
+                Err(anyhow!("Embedding optimization failed"))
             }
         }
     } // end of h_embed
 
     /// do the embedding
-    pub fn one_step_embed(&mut self) -> Result<usize, usize> {
+    pub fn one_step_embed(&mut self) -> Result<usize, anyhow::Error> {
         //
         log::info!("doing 1 step embedding");
         self.parameters.log();
@@ -328,7 +332,11 @@ where
                 sys_start.elapsed().unwrap().as_millis(),
                 cpu_start.elapsed().as_millis()
             );
-            set_data_box(&mut initial_embedding, F::from(10.).unwrap());
+            set_data_box(&mut initial_embedding, F::from(10.).unwrap())
+                .map_err(|e| {
+                    log::error!("Failed to normalize initial embedding: {}", e);
+                    e
+                })?;
         } else {
             // if we use random initialization we must have a box size coherent with renormalizes scales, so box size is 1.
             // We need to set initial_space first before calling get_random_init
@@ -359,9 +367,9 @@ where
                 self.embedding = Some(embedding);
                 Ok(1)
             }
-            _ => {
-                log::error!("Embedder::embed : embedding optimization failed");
-                Err(1)
+            Err(e) => {
+                log::error!("Embedder::embed : embedding optimization failed: {:?}", e);
+                Err(anyhow!("Embedding optimization failed: {:?}", e))
             }
         }
     } // end embed
@@ -1287,13 +1295,14 @@ fn estimate_embedded_scales_from_initial_scales(initial_scales: &[f32]) -> Vec<f
 } // end of estimate_embedded_scale_from_initial_scales
 
 // renormalize data (center and enclose in a box of a given box size) before optimization of cross entropy
-fn set_data_box<F>(data: &mut Array2<F>, box_size: F)
+fn set_data_box<F>(data: &mut Array2<F>, box_size: F) -> Result<(), anyhow::Error>
 where
     F: Float
         + NumAssign
         + std::iter::Sum<F>
         + num_traits::cast::FromPrimitive
-        + ndarray::ScalarOperand,
+        + ndarray::ScalarOperand
+        + std::fmt::Display,
 {
     let nbdata = data.nrows();
     let dim = data.ncols();
@@ -1315,19 +1324,116 @@ where
     }
     //
     max_max /= box_size / F::from(2.).unwrap();
-    for f in data.iter_mut() {
-        *f /= max_max;
-        assert!((*f).abs() <= box_size);
+    
+    // Check for numerical issues before division
+    if max_max == F::zero() || max_max.is_infinite() || max_max.is_nan() {
+        return Err(anyhow!(
+            "Data normalization failed: max_max = {} is invalid. \
+             This indicates the data may be constant, contain NaN/Inf values, or have numerical issues.",
+            max_max
+        ));
     }
+    
+    for (idx, f) in data.iter_mut().enumerate() {
+        *f /= max_max;
+        // Check for NaN or Inf that could occur during division
+        if (*f).is_nan() || (*f).is_infinite() {
+            let row = idx / dim;
+            let col = idx % dim;
+            return Err(anyhow!(
+                "Data normalization failed: value at [{}, {}] became {} after normalization. \
+                 This typically indicates numerical instability in the data. \
+                 Consider normalizing your data before processing. \
+                 (max_max scaling factor was {})",
+                row, col, *f, max_max
+            ));
+        }
+        // The old assertion was checking a post-condition that should always be true
+        // after normalization, so we can add it as a debug assertion
+        debug_assert!((*f).abs() <= box_size, "Normalization invariant violated");
+    }
+    Ok(())
 } // end of set_data_box
 
 #[cfg(test)]
 #[allow(clippy::range_zip_with_len)]
 mod tests {
+    use super::*;
+    use ndarray::Array2;
+    
+    #[test]
+    fn test_set_data_box_normal_data() {
+        // Normal data should work fine
+        let mut data = Array2::<f64>::from_shape_vec(
+            (3, 2),
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+        ).unwrap();
+        
+        let result = set_data_box(&mut data, 10.0);
+        assert!(result.is_ok(), "Normal data should not cause error");
+    }
+    
+    #[test]
+    fn test_set_data_box_extreme_values() {
+        // Test that extreme values are properly normalized
+        let mut data = Array2::<f64>::from_shape_vec(
+            (3, 2),
+            vec![1.0, 2.0, 1e10, 4.0, 5.0, 6.0]
+        ).unwrap();
+        
+        let box_size = 10.0;
+        let result = set_data_box(&mut data, box_size);
+        
+        // Extreme values should be normalized successfully
+        assert!(result.is_ok(), "Extreme values should be normalized without error");
+        
+        // Verify all values are within bounds after normalization
+        for val in data.iter() {
+            assert!(val.abs() <= box_size, "Value {} exceeds box_size {}", val, box_size);
+            assert!(val.is_finite(), "Value should be finite after normalization");
+        }
+    }
+    
+    #[test]
+    fn test_set_data_box_constant_data() {
+        // All same values (max_max would be 0)
+        let mut data = Array2::<f64>::from_shape_vec(
+            (3, 2),
+            vec![5.0, 5.0, 5.0, 5.0, 5.0, 5.0]
+        ).unwrap();
+        
+        let result = set_data_box(&mut data, 10.0);
+        assert!(result.is_err(), "Constant data should cause error");
+        
+        if let Err(e) = result {
+            let error_msg = format!("{}", e);
+            assert!(error_msg.contains("max_max"), "Error should mention max_max");
+        }
+    }
+    
+    #[test]
+    fn test_set_data_box_nan_values() {
+        // Data containing NaN - the NaN will cause max_max to become NaN
+        let mut data = Array2::<f64>::from_shape_vec(
+            (3, 2),
+            vec![1.0, 2.0, f64::NAN, 4.0, 5.0, 6.0]
+        ).unwrap();
+        
+        let result = set_data_box(&mut data, 10.0);
+        assert!(result.is_err(), "NaN values should cause error");
+        
+        if let Err(e) = result {
+            let error_msg = format!("{}", e);
+            // The error could be caught either at max_max check or during division
+            assert!(
+                error_msg.contains("max_max") || error_msg.contains("numerical instability"),
+                "Error should mention numerical issues: {}",
+                error_msg
+            );
+        }
+    }
 
     //    cargo test embedder  -- --nocapture
-
-    use super::*;
 
     fn log_init_test() {
         let _ = env_logger::builder().is_test(true).try_init();
