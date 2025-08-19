@@ -168,12 +168,12 @@ where
     }
 
     /// dispatch to one_step embed or hierarchical embedding
-    pub fn embed(&mut self) -> Result<usize, usize> {
+    pub fn embed(&mut self) -> Result<usize, anyhow::Error> {
         if self.kgraph.is_some() {
             log::info!("doing one step embedding");
             self.one_step_embed().map_err(|e| {
                 log::error!("one_step_embed failed: {}", e);
-                1
+                e
             })
         } else {
             log::info!("doing 2 step embedding");
@@ -182,10 +182,10 @@ where
     } // end of embed
 
     /// do hierarchical embedding on GraphPrrojection
-    pub fn h_embed(&mut self) -> Result<usize, usize> {
+    pub fn h_embed(&mut self) -> Result<usize, anyhow::Error> {
         if self.hkgraph.is_none() {
             log::error!("Embedder::h_embed , graph projection is none");
-            return Err(1);
+            return Err(anyhow!("Graph projection is not initialized"));
         }
         log::debug!("in h_embed");
         // one_step embed of the small graph.
@@ -203,7 +203,7 @@ where
         let res_first = embedder_first_step.one_step_embed();
         if res_first.is_err() {
             log::error!("Embedder::h_embed first step failed: {:?}", res_first.as_ref().err());
-            return res_first.map_err(|_| 1);
+            return res_first;
         }
         log::info!(
             " first step embedding sys time(ms) {:.2e} cpu time(ms) {:.2e}",
