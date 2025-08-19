@@ -278,7 +278,7 @@ where
             }
             _ => {
                 log::error!("Embedder::embed : embedding optimization failed");
-                Err(1)
+                Err(anyhow!("Embedding optimization failed"))
             }
         }
     } // end of h_embed
