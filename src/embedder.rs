@@ -332,11 +332,32 @@ where
                 sys_start.elapsed().unwrap().as_millis(),
                 cpu_start.elapsed().as_millis()
             );
-            set_data_box(&mut initial_embedding, F::from(10.).unwrap())
-                .map_err(|e| {
-                    log::error!("Failed to normalize initial embedding: {}", e);
-                    e
-                })?;
+            
+            // Check if diffusion map produced valid results
+            let is_valid = initial_embedding.iter()
+                .any(|&val| val != F::zero() && val.is_finite());
+            
+            if !is_valid {
+                log::warn!("Diffusion map initialization produced invalid results (all zeros or non-finite), falling back to random initialization");
+                // Fall back to random initialization  
+                // Need to set initial_space if not already set
+                if self.initial_space.is_none() {
+                    self.initial_space = Some(to_proba_edges(
+                        graph_to_embed,
+                        self.parameters.scale_rho as f32,
+                        self.parameters.beta as f32,
+                    ));
+                }
+                // Use the same random init method as the else branch
+                initial_embedding = self.get_random_init(1.);
+            } else {
+                // Normalize the diffusion map embedding
+                set_data_box(&mut initial_embedding, F::from(10.).unwrap())
+                    .map_err(|e| {
+                        log::error!("Failed to normalize initial embedding: {}", e);
+                        e
+                    })?;
+            }
         } else {
             // if we use random initialization we must have a box size coherent with renormalizes scales, so box size is 1.
             // We need to set initial_space first before calling get_random_init
